@@ -418,7 +418,7 @@ async function keywordSearch() {
         // Search sentence_embeddings that contain the keyword (case-insensitive)
         const { data, error } = await supabaseClient
             .from('sentence_embeddings')
-            .select('text, talk_id, title, speaker, url')
+            .select('text, talk_id, title, speaker, url, paragraph_id, anchor_id')
             .ilike('text', `%${query}%`)
             .limit(20);
 
@@ -437,7 +437,8 @@ async function keywordSearch() {
                 talks[talkId] = {
                     title: row.title || 'Unknown Talk',
                     speaker: row.speaker || 'Unknown Speaker',
-                    url: row.url || '',
+                    // Link to the paragraph of the talk's first match
+                    url: talkLink(row.url, row.paragraph_id, row.anchor_id),
                     sentences: []
                 };
             }
@@ -498,7 +499,7 @@ async function semanticSearch() {
             html += `<div class="result-card">
                 <div class="result-card-header">
                     <div>
-                        <div class="result-title"><a href="${escapeHtml(result.url)}" target="_blank" class="result-title-link">${escapeHtml(result.title)}</a></div>
+                        <div class="result-title"><a href="${escapeHtml(talkLink(result.url, result.paragraph_id, result.anchor_id))}" target="_blank" class="result-title-link">${escapeHtml(result.title)}</a></div>
                         <div class="result-speaker">by ${escapeHtml(result.speaker)}</div>
                     </div>
                     ${badge}
@@ -583,6 +584,17 @@ async function askQuestion() {
 // SHARED SEARCH UTILITIES
 // ============================================
 
+// Link to a talk with one paragraph highlighted. ?id= highlights it but doesn't scroll;
+// #anchor scrolls. anchorId is the paragraph BEFORE it, so the highlight sits below the
+// site's sticky header and stays in view if videos render and shift the page after load.
+function talkLink(url, paragraphId, anchorId) {
+    if (!url || !paragraphId) return url || '';
+    const link = new URL(url);
+    link.searchParams.set('id', paragraphId);
+    link.hash = anchorId || paragraphId;
+    return link.toString();
+}
+
 // Get embedding via Edge Function
 async function getEmbedding(text) {
     const { data, error } = await supabaseClient.functions.invoke('embed-question', {
@@ -621,11 +633,20 @@ function groupByTalk(sentences) {
                 speaker: sent.speaker,
                 url: sent.url,
                 sentences: [],
-                totalSimilarity: 0
+                totalSimilarity: 0,
+                bestSimilarity: -Infinity,
+                bestParagraphId: null,
+                bestAnchorId: null
             };
         }
-        talkMap[sent.talk_id].sentences.push(sent.text);
-        talkMap[sent.talk_id].totalSimilarity += sent.similarity;
+        const talk = talkMap[sent.talk_id];
+        talk.sentences.push(sent.text);
+        talk.totalSimilarity += sent.similarity;
+        if (sent.similarity > talk.bestSimilarity) {
+            talk.bestSimilarity = sent.similarity;
+            talk.bestParagraphId = sent.paragraph_id;
+            talk.bestAnchorId = sent.anchor_id;
+        }
     }
 
     return Object.values(talkMap)
@@ -635,7 +656,8 @@ function groupByTalk(sentences) {
             talk_id: talk.talk_id,
             title: talk.title,
             speaker: talk.speaker,
-            url: talk.url,
+            // Link to the paragraph of the talk's best-matching sentence
+            url: talkLink(talk.url, talk.bestParagraphId, talk.bestAnchorId),
             text: talk.sentences.join(' '),
             // TODO: Is average similarity the right metric? Alternatives worth researching:
             // - Max similarity (best single match per talk)

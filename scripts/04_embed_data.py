@@ -60,12 +60,21 @@ def main():
     if os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, 'r', encoding='utf-8') as f:
             existing = json.load(f)
+        # Only resume if the saved records are the same sentences, in the same order
+        # (they won't be after re-scraping or changing how text is split)
+        if len(existing) > len(records) or any(
+            any(e.get(k) != r.get(k) for k in ('text', 'paragraph_id', 'anchor_id'))
+            for e, r in zip(existing, records)
+        ):
+            print(f"   ♻️  {OUTPUT_FILE} is from different sentence data — starting over")
+            existing = []
         already_embedded = len(existing)
         if already_embedded >= len(records):
             print(f"✅ All {len(records):,} sentences already have embeddings in {OUTPUT_FILE}")
             print(f"   Delete {OUTPUT_FILE} to re-generate.")
             return
-        print(f"   ⏩ Resuming from sentence {already_embedded:,} (found partial output)")
+        if already_embedded:
+            print(f"   ⏩ Resuming from sentence {already_embedded:,} (found partial output)")
         records_to_embed = records[already_embedded:]
     else:
         existing = []

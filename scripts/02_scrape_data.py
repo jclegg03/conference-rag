@@ -114,7 +114,17 @@ def scrape_talk(talk_url, session):
     if not content_div:
         return None
 
-    content = " ".join(p.text.strip() for p in content_div.find_all("p"))
+    # Keep each paragraph's HTML id (p1, p2, ...) so results can link straight to it.
+    # "anchor" is the id of the paragraph just before it on the page; links scroll there
+    # so the highlighted paragraph lands below the site's sticky header. (Ids aren't
+    # always sequential pN, so the previous one has to be recorded, not computed.)
+    paragraphs = []
+    prev_id = None
+    for p in content_div.find_all("p"):
+        if p.text.strip():
+            paragraphs.append({"id": p.get("id"), "anchor": prev_id or p.get("id"), "text": p.text.strip()})
+        prev_id = p.get("id") or prev_id
+    content = " ".join(p["text"] for p in paragraphs)
 
     year_match = re.search(r'/(\d{4})/', talk_url)
     year = int(year_match.group(1)) if year_match else None
@@ -127,7 +137,8 @@ def scrape_talk(talk_url, session):
         "year": year,
         "season": season,
         "url": talk_url,
-        "text": content
+        "text": content,
+        "paragraphs": paragraphs
     }
 
 

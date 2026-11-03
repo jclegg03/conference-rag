@@ -31,6 +31,7 @@ import sys
 import time
 import uuid
 
+import requests
 from supabase import create_client
 from tqdm import tqdm
 
@@ -46,6 +47,34 @@ def load_config():
     with open('config.secret.json', 'r') as f:
         secrets = json.load(f)
     return public_config, secrets
+
+
+def truncate_table(secrets):
+    """Empty the table with SQL TRUNCATE (via the Management API, like 01_create_schema.py).
+    A REST delete of every row is too slow once the vector index exists and times out."""
+    resp = requests.post(
+        f"https://api.supabase.com/v1/projects/{secrets['SUPABASE_PROJECT_REF']}/database/query",
+        headers={"Authorization": f"Bearer {secrets['SUPABASE_ACCESS_TOKEN']}"},
+        json={"query": "TRUNCATE sentence_embeddings;"},
+        timeout=60,
+    )
+    if resp.status_code >= 300:
+        # Stop rather than import on top of the old rows and create duplicates
+        print(f"   ❌ Could not truncate table: {resp.status_code} {resp.text[:300]}")
+        sys.exit(1)
+
+
+def insert_with_retry(client, batch, batch_num, attempts=3):
+    """Insert one batch, retrying on transient errors (e.g. a 502 from the gateway)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            client.table('sentence_embeddings').insert(batch).execute()
+            return True
+        except Exception as e:
+            if attempt == attempts:
+                print(f"\nError at batch {batch_num}: {e}")
+                return False
+            time.sleep(2 * attempt)
 
 
 def split_into_sentences(text):
@@ -74,8 +103,14 @@ def main():
     sentence_records = []
     for talk in tqdm(talks, desc="Splitting"):
         talk_id = str(uuid.uuid4())
-        sentences = split_into_sentences(talk['text'])
-        for i, sentence in enumerate(sentences, 1):
+        # Split within each paragraph so every sentence knows which paragraph it came from
+        paragraphs = talk.get('paragraphs') or [{'id': None, 'anchor': None, 'text': talk['text']}]
+        sentences = [
+            (paragraph['id'], paragraph['anchor'], sentence)
+            for paragraph in paragraphs
+            for sentence in split_into_sentences(paragraph['text'])
+        ]
+        for i, (paragraph_id, anchor_id, sentence) in enumerate(sentences, 1):
             sentence_records.append({
                 'talk_id': talk_id,
                 'title': talk['title'],
@@ -85,6 +120,8 @@ def main():
                 'season': talk['season'],
                 'url': talk['url'],
                 'sentence_num': i,
+                'paragraph_id': paragraph_id,
+                'anchor_id': anchor_id,
                 'text': sentence
                 # No 'embedding' field — added in next step
             })
@@ -107,18 +144,14 @@ def main():
     print("Checking for existing data...")
     print("=" * 60)
 
-    try:
-        result = client.table('sentence_embeddings').select('id', count='exact').limit(1).execute()
-        existing_count = result.count or 0
-        if existing_count > 0:
-            print(f"   Found {existing_count:,} existing rows. Truncating table...")
-            client.table('sentence_embeddings').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute()
-            print("   ✅ Table truncated.")
-        else:
-            print("   Table is empty — ready for import.")
-    except Exception as e:
-        print(f"   ⚠️ Could not check existing data: {e}")
-        print("   Proceeding with import anyway...")
+    result = client.table('sentence_embeddings').select('id', count='exact').limit(1).execute()
+    existing_count = result.count or 0
+    if existing_count > 0:
+        print(f"   Found {existing_count:,} existing rows. Truncating table...")
+        truncate_table(secrets)
+        print("   ✅ Table truncated.")
+    else:
+        print("   Table is empty — ready for import.")
 
     # Import in batches
     print("\n" + "=" * 60)
@@ -131,11 +164,9 @@ def main():
 
     for i in tqdm(range(0, len(sentence_records), BATCH_SIZE), desc="Importing"):
         batch = sentence_records[i:i + BATCH_SIZE]
-        try:
-            client.table('sentence_embeddings').insert(batch).execute()
+        if insert_with_retry(client, batch, i // BATCH_SIZE):
             success += len(batch)
-        except Exception as e:
-            print(f"\nError at batch {i // BATCH_SIZE}: {e}")
+        else:
             errors += len(batch)
         time.sleep(0.1)
 

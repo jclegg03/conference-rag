@@ -53,10 +53,16 @@ CREATE TABLE IF NOT EXISTS sentence_embeddings (
     season TEXT,
     url TEXT,
     sentence_num INTEGER,
+    paragraph_id TEXT,
+    anchor_id TEXT,
     text TEXT NOT NULL,
     embedding vector(1536),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Added after the original schema; brings existing tables up to date
+ALTER TABLE sentence_embeddings ADD COLUMN IF NOT EXISTS paragraph_id TEXT;
+ALTER TABLE sentence_embeddings ADD COLUMN IF NOT EXISTS anchor_id TEXT;
 
 -- Create index for talk_id grouping
 CREATE INDEX IF NOT EXISTS sentence_embeddings_talk_id_idx 
@@ -119,6 +125,8 @@ RETURNS TABLE (
   title text,
   speaker text,
   url text,
+  paragraph_id text,
+  anchor_id text,
   text text,
   similarity float
 )
@@ -130,6 +138,8 @@ AS $$
     sentence_embeddings.title,
     sentence_embeddings.speaker,
     sentence_embeddings.url,
+    sentence_embeddings.paragraph_id,
+    sentence_embeddings.anchor_id,
     sentence_embeddings.text,
     1 - (sentence_embeddings.embedding <=> query_embedding) as similarity
   FROM sentence_embeddings

@@ -25,6 +25,7 @@ import os
 import sys
 import time
 
+import requests
 from supabase import create_client
 from tqdm import tqdm
 
@@ -39,6 +40,34 @@ def load_config():
     with open('config.secret.json', 'r') as f:
         secrets = json.load(f)
     return public_config, secrets
+
+
+def truncate_table(secrets):
+    """Empty the table with SQL TRUNCATE (via the Management API, like 01_create_schema.py).
+    A REST delete of every row is too slow once the vector index exists and times out."""
+    resp = requests.post(
+        f"https://api.supabase.com/v1/projects/{secrets['SUPABASE_PROJECT_REF']}/database/query",
+        headers={"Authorization": f"Bearer {secrets['SUPABASE_ACCESS_TOKEN']}"},
+        json={"query": "TRUNCATE sentence_embeddings;"},
+        timeout=60,
+    )
+    if resp.status_code >= 300:
+        # Stop rather than import on top of the old rows and create duplicates
+        print(f"   ❌ Could not truncate table: {resp.status_code} {resp.text[:300]}")
+        sys.exit(1)
+
+
+def insert_with_retry(client, batch, batch_num, attempts=3):
+    """Insert one batch, retrying on transient errors (e.g. a 502 from the gateway)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            client.table('sentence_embeddings').insert(batch).execute()
+            return True
+        except Exception as e:
+            if attempt == attempts:
+                print(f"\nError at batch {batch_num}: {e}")
+                return False
+            time.sleep(2 * attempt)
 
 
 def main():
@@ -69,18 +98,14 @@ def main():
     print("Replacing database contents (truncate + re-import)")
     print("=" * 60)
 
-    try:
-        result = client.table('sentence_embeddings').select('id', count='exact').limit(1).execute()
-        existing_count = result.count or 0
-        if existing_count > 0:
-            print(f"   Truncating {existing_count:,} existing rows...")
-            client.table('sentence_embeddings').delete().neq('id', '00000000-0000-0000-0000-000000000000').execute()
-            print("   ✅ Table truncated.")
-        else:
-            print("   Table is empty — ready for import.")
-    except Exception as e:
-        print(f"   ⚠️ Could not check existing data: {e}")
-        print("   Proceeding with import anyway...")
+    result = client.table('sentence_embeddings').select('id', count='exact').limit(1).execute()
+    existing_count = result.count or 0
+    if existing_count > 0:
+        print(f"   Truncating {existing_count:,} existing rows...")
+        truncate_table(secrets)
+        print("   ✅ Table truncated.")
+    else:
+        print("   Table is empty — ready for import.")
 
     # Batch import (much faster than individual updates!)
     print(f"\n   Importing {len(records):,} records in batches of {BATCH_SIZE}...\n")
@@ -90,11 +115,9 @@ def main():
 
     for i in tqdm(range(0, len(records), BATCH_SIZE), desc="Importing"):
         batch = records[i:i + BATCH_SIZE]
-        try:
-            client.table('sentence_embeddings').insert(batch).execute()
+        if insert_with_retry(client, batch, i // BATCH_SIZE):
             success += len(batch)
-        except Exception as e:
-            print(f"\nError at batch {i // BATCH_SIZE}: {e}")
+        else:
             errors += len(batch)
         time.sleep(0.1)
 
