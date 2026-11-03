@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS sentence_embeddings (
 CREATE INDEX IF NOT EXISTS sentence_embeddings_talk_id_idx 
 ON sentence_embeddings(talk_id);
 
+-- HNSW index for fast similarity search; without it, match_sentences() scans
+-- every vector and times out on the free tier
+CREATE INDEX IF NOT EXISTS sentence_embeddings_embedding_idx
+ON sentence_embeddings USING hnsw (embedding vector_cosine_ops);
+
 -- Enable Row Level Security
 ALTER TABLE sentence_embeddings ENABLE ROW LEVEL SECURITY;
 
